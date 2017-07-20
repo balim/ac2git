@@ -861,7 +861,7 @@ class AccuRev2Git(object):
         
             logger.debug("FindNextChangeTransaction diff: {0}".format(nextTr))
             return (nextTr, diff)
-        elif self.config.method == "deep-hist":
+        elif self.config.method in [ "deep-hist", "deep-hist-only" ]:
             if deepHist is None:
                 raise Exception("Script error! deepHist argument cannot be none when running a deep-hist method.")
             # Find the next transaction
@@ -869,6 +869,8 @@ class AccuRev2Git(object):
                 if tr.id > startTrNumber:
                     if tr.Type in ignored_transaction_types:
                         logger.debug("Ignoring transaction #{id} - {Type} (transaction type is in ignored_transaction_types list)".format(id=tr.id, Type=tr.Type))
+                    elif self.config.method == "deep-hist-only":
+                        return (tr.id, None)
                     else:
                         diff, diffXml = self.TryDiff(streamName=streamName, firstTrNumber=startTrNumber, secondTrNumber=tr.id)
                         if diff is None:
@@ -886,7 +888,7 @@ class AccuRev2Git(object):
             logger.debug("FindNextChangeTransaction pop: {0}".format(startTrNumber + 1))
             return (startTrNumber + 1, None)
         else:
-            logger.error("Method is unrecognized, allowed values are 'pop', 'diff' and 'deep-hist'")
+            logger.error("Method is unrecognized, allowed values are 'pop', 'diff', 'deep-hist', and 'deep-hist-only'")
             raise Exception("Invalid configuration, method unrecognized!")
 
     def DeleteDiffItemsFromRepo(self, diff):
@@ -1295,7 +1297,7 @@ class AccuRev2Git(object):
 
         # Iterate over all of the transactions that affect the stream we are interested in and maybe the "chstream" transactions (which affect the streams.xml).
         deepHist = None
-        if self.config.method == "deep-hist":
+        if self.config.method in [ "deep-hist", "deep-hist-only" ]:
             ignoreTimelocks=False # The code for the timelocks is not tested fully yet. Once tested setting this to false should make the resulting set of transactions smaller
                                  # at the cost of slightly larger number of upfront accurev commands called.
             logger.debug("accurev.ext.deep_hist(depot={0}, stream={1}, timeSpec='{2}-{3}', ignoreTimelocks={4})".format(depot, stream.name, tr.id, endTr.id, ignoreTimelocks))
@@ -3316,7 +3318,7 @@ class AccuRev2Git(object):
 
             self.gitRepo.raw_cmd([u'git', u'config', u'--local', u'gc.auto', u'0'])
 
-            if self.config.method in [ "deep-hist", "diff", "pop" ]:
+            if self.config.method in [ "deep-hist", "deep-hist-only", "diff", "pop" ]:
                 logger.info("Retrieveing stream information from Accurev into hidden refs.")
                 self.RetrieveStreams()
             elif self.config.method in [ "skip" ]:
@@ -3463,6 +3465,8 @@ def DumpExampleConfigFile(outputFilename):
         <remote name="backup" url="https://github.com/orao/ac2git.git" />
     </git>
     <method>deep-hist</method> <!-- The method specifies what approach is taken to retrieve information from Accurev. Allowed values are 'deep-hist', 'diff', 'pop' and 'skip'.
+                                     - deep-hist-only: Works like deep-hist below but does not perform diffs between transactions. Useful if your Accurev version doesn't
+                                                       support the `accurev diff -a -v stream -V stream -t x-y` command
                                      - deep-hist: Works by using the accurev.ext.deep_hist() function to return a list of transactions that could have affected the stream.
                                                   It then performs a diff between the transactions and only populates the files that have changed like the 'diff' method.
                                                   It is the quickest method but is only as reliable as the information that accurev.ext.deep_hist() provides.
@@ -4015,7 +4019,7 @@ def AccuRev2GitMain(argv):
     parser.add_argument('-p', '--accurev-password',  dest='accurevPassword', metavar='<accurev-password>',  help="The password for the provided accurev username.")
     parser.add_argument('-d', '--accurev-depot', dest='accurevDepot',        metavar='<accurev-depot>',     help="The AccuRev depot in which the streams that are being converted are located. This script currently assumes only one depot is being converted at a time.")
     parser.add_argument('-g', '--git-repo-path', dest='gitRepoPath',         metavar='<git-repo-path>',     help="The system path to an existing folder where the git repository will be created.")
-    parser.add_argument('-M', '--method', dest='conversionMethod', choices=['skip', 'pop', 'diff', 'deep-hist'], metavar='<conversion-method>', help="Specifies the method which is used to perform the conversion. Can be either 'pop', 'diff' or 'deep-hist'. 'pop' specifies that every transaction is populated in full. 'diff' specifies that only the differences are populated but transactions are iterated one at a time. 'deep-hist' specifies that only the differences are populated and that only transactions that could have affected this stream are iterated.")
+    parser.add_argument('-M', '--method', dest='conversionMethod', choices=['skip', 'pop', 'diff', 'deep-hist', 'deep-hist-only'], metavar='<conversion-method>', help="Specifies the method which is used to perform the conversion. Can be either 'pop', 'diff', 'deep-hist', or 'deep-hist-only'. 'pop' specifies that every transaction is populated in full. 'diff' specifies that only the differences are populated but transactions are iterated one at a time. 'deep-hist' specifies that only the differences are populated and that only transactions that could have affected this stream are iterated. 'deep-hist-only' specifies that only transactions that could have affected the stream are iterated and all resulting transactions are processed.")
     parser.add_argument('-S', '--merge-strategy', dest='mergeStrategy', choices=['skip', 'normal', 'orphanage'], metavar='<merge-strategy>', help="Sets the merge strategy which dictates how the git repository branches are generated. Depending on the value chosen the branches can be orphan branches ('orphanage' strategy) or have merges where promotes have occurred with the 'normal' strategy. The 'skip' strategy forces the script to skip making the git branches and will cause it to only do the retrieving of information from accurev for use with some strategy at a later date.")
     parser.add_argument('-E', '--empty-child-stream-action', dest='emptyChildStreamAction', choices=['merge', 'cherry-pick'], metavar='<empty-child-stream-action>', help="When a promote to a parent stream affects the child stream and the result of the two commits on the two branches in git results in a git diff operation returning empty then it could be said that this was in-fact a merge (of sorts). This option controlls whether such situations are treated as cherry-picks or merges in git.")
     parser.add_argument('-K', '--source-stream-fast-forward', dest='sourceStreamFastForward', choices=['true', 'false'], metavar='<source-stream-fast-forward>', help="When both the source and destination streams are known this flag controlls whether the source branch is moved to the resulting merge commit (the destination branch is always updated/moved to this commit). This has an effect of making the history look like the letter K where the promotes come in and then branch from the merge commit instead of the previous commit which occured on the branch.")
