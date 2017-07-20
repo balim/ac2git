@@ -856,7 +856,8 @@ class AccuRev2Git(object):
                 nextTr += 1
                 diff, diffXml = self.TryDiff(streamName=streamName, firstTrNumber=startTrNumber, secondTrNumber=nextTr)
                 if diff is None:
-                    return (None, None)
+                    logger.warning("FindNextChangeTransaction diff: tr. {0} will be assumed to be significant".format(nextTr))
+                    return (nextTr, None)
         
             logger.debug("FindNextChangeTransaction diff: {0}".format(nextTr))
             return (nextTr, diff)
@@ -871,7 +872,8 @@ class AccuRev2Git(object):
                     else:
                         diff, diffXml = self.TryDiff(streamName=streamName, firstTrNumber=startTrNumber, secondTrNumber=tr.id)
                         if diff is None:
-                            return (None, None)
+                            logger.warning("FindNextChangeTransaction deep-hist: tr. {0} will be assumed to be significant".format(nextTr))
+                            return (tr.id, None)
                         elif len(diff.elements) > 0:
                             logger.debug("FindNextChangeTransaction deep-hist: {0}".format(tr.id))
                             return (tr.id, diff)
@@ -991,6 +993,7 @@ class AccuRev2Git(object):
         return xmlDecoded
 
     def WriteInfoFiles(self, path, depot, transaction, streamsXml=None, histXml=None, streamName=None, diffXml=None, useCommandCache=False):
+        rv = {}
         streams = None
         hist = None
         diff = None
@@ -999,41 +1002,56 @@ class AccuRev2Git(object):
             streams = accurev.obj.Show.Streams.fromxmlstring(streamsXml)
         
         if streams is None or streamsXml is None:
-            streams, streamsXml = self.TryStreams(depot=depot, timeSpec=transaction)
-            if streams is None or streamsXml is None:
-                return (None, None, None)
+            streams, streamsXml2 = self.TryStreams(depot=depot, timeSpec=transaction)
+            if streams is not None and streamsXml2 is not None:
+                streamsXml = streamsXml2
 
         if histXml is not None:
             hist = accurev.obj.History.fromxmlstring(histXml)
         if hist is None or histXml is None:
-            hist, histXml = self.TryHist(depot=depot, timeSpec=transaction)
-            if hist is None or histXml is None:
-                return (None, None)
+            hist, histXml2 = self.TryHist(depot=depot, timeSpec=transaction)
+            if hist is not None and histXml2 is not None:
+                histXml = histXml2
 
-        tr = hist.transactions[0]
-        if tr.id > 1 and tr.Type != "mkstream":
+        tr = None
+        if hist is not None:
+            tr = hist.transactions[0]
+
+        if tr is None or tr.id > 1 and tr.Type != "mkstream":
             if diffXml is not None:
                 diff = accurev.obj.Diff.fromxmlstring(streamsXml)
             
             if diff is None or diffXml is None:
                 if streamName is not None:
-                    diff, diffXml = self.TryDiff(streamName=streamName, firstTrNumber=tr.id, secondTrNumber=(tr.id - 1))
-                    if diff is None or diffXml is None:
-                        return (None, None)
-                else:
-                    return (None, None)
+                    diff, diffXml2 = self.TryDiff(streamName=streamName, firstTrNumber=tr.id, secondTrNumber=(tr.id - 1))
+                if diffXml2 is not None and diff is not None:
+                    diffXml = diffXml2
 
-            diffFilePath = os.path.join(self.gitRepo.path, 'diff.xml')
-            with codecs.open(diffFilePath, mode='w', encoding='utf-8') as f:
-                f.write(self.NormalizeAccurevXml(diffXml))
+            if diffXml is not None:
+                diffFilePath = os.path.join(self.gitRepo.path, 'diff.xml')
+                with codecs.open(diffFilePath, mode='w', encoding='utf-8') as f:
+                    f.write(self.NormalizeAccurevXml(diffXml))
+                rv["diff"] = { "filename": diffFilePath, 
+                               "xml": diffXml,
+                               "object": diff }
 
-        streamsFilePath = os.path.join(path, 'streams.xml')
-        with codecs.open(streamsFilePath, mode='w', encoding='utf-8') as f:
-            f.write(self.NormalizeAccurevXml(streamsXml))
-        
-        histFilePath = os.path.join(path, 'hist.xml')
-        with codecs.open(histFilePath, mode='w', encoding='utf-8') as f:
-            f.write(self.NormalizeAccurevXml(histXml))
+        if streamsXml is not None:
+            streamsFilePath = os.path.join(path, 'streams.xml')
+            with codecs.open(streamsFilePath, mode='w', encoding='utf-8') as f:
+                f.write(self.NormalizeAccurevXml(streamsXml))
+            rv["streams"] = { "filename": streamsFilePath, 
+                              "xml": streamsXml,
+                              "object": streams }
+
+        if histXml is not None:
+            histFilePath = os.path.join(path, 'hist.xml')
+            with codecs.open(histFilePath, mode='w', encoding='utf-8') as f:
+                f.write(self.NormalizeAccurevXml(histXml))
+            rv["hist"] = { "filename": histFilePath, 
+                           "xml": histXml,
+                           "object": hist }
+
+        return rv
 
     # GetDepotRefsNamespace
     # When depot is None it returns the git ref namespace where all depots are under.
@@ -1248,7 +1266,10 @@ class AccuRev2Git(object):
                 self.gitRepo.rm(fileList=['.'], force=True, recursive=True)
                 self.ClearGitRepo()
 
-                self.WriteInfoFiles(path=self.gitRepo.path, depot=depot, streamName=stream.name, transaction=tr.id, useCommandCache=self.config.accurev.UseCommandCache())
+                result = self.WriteInfoFiles(path=self.gitRepo.path, depot=depot, streamName=stream.name, transaction=tr.id, useCommandCache=self.config.accurev.UseCommandCache())
+                if "hist" not in result or "streams" not in result:
+                    logger.warning( "Failed to write streams.xml or hist.xml" )
+                    return (None, None)
 
                 commitHash = self.Commit(transaction=tr, messageOverride="transaction {trId}".format(trId=tr.id), parents=[], ref=stateRef, authorIsCommitter=True)
                 if commitHash is None:
@@ -1298,14 +1319,6 @@ class AccuRev2Git(object):
                     self.SafeCheckout(ref=stateRef, doReset=True, doClean=True)
                     doInitialCheckout = False
 
-                # Right now nextTr is an integer representation of our next transaction.
-                # Delete all of the files which are even mentioned in the diff so that we can do a quick populate (wouth the overwrite option)
-                if self.config.method == "pop":
-                    self.ClearGitRepo()
-                else:
-                    if diff is None:
-                        return (None, None)
-
                 # The accurev hist command here must be used with the depot option since the transaction that has affected us may not
                 # be a promotion into the stream we are looking at but into one of its parent streams. Hence we must query the history
                 # of the depot and not the stream itself.
@@ -1316,7 +1329,16 @@ class AccuRev2Git(object):
                 tr = hist.transactions[0]
                 stream = accurev.show.streams(depot=depot, stream=stream.streamNumber, timeSpec=tr.id, useCache=self.config.accurev.UseCommandCache()).streams[0]
 
-                self.WriteInfoFiles(path=self.gitRepo.path, depot=depot, streamName=stream.name, transaction=tr.id, useCommandCache=self.config.accurev.UseCommandCache())
+                # Delete everything in the index and working directory
+                # because failed diffs may result in the diff.xml not being
+                # written. Ensure that the previous version is not committed.
+                self.gitRepo.rm(fileList=['.'], force=True, recursive=True)
+                self.ClearGitRepo()
+
+                result = self.WriteInfoFiles(path=self.gitRepo.path, depot=depot, streamName=stream.name, transaction=tr.id, useCommandCache=self.config.accurev.UseCommandCache())
+                if "hist" not in result or "streams" not in result:
+                    logger.error( "Failed to write streams.xml or hist.xml" )
+                    return (None, None)
                     
                 # Commit
                 commitHash = self.Commit(transaction=tr, messageOverride="transaction {trId}".format(trId=tr.id), ref=stateRef, authorIsCommitter=True)
